@@ -1,0 +1,7 @@
+{
+  "name": "Universal Performance Audit",
+  "description": "⚡ Daily Performance Intelligence - Comprehensive performance monitoring with Lighthouse audits and optimization recommendations",
+  "iconName": "zap",
+  "categories": ["Performance", "Monitoring", "Optimization"],
+  "filePatterns": ["package.json?", "*.js", "*.jsx", "*.ts", "*.tsx", "lighthouse.json?"]
+}
