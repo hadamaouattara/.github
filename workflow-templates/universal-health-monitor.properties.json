@@ -1,0 +1,7 @@
+{
+  "name": "Universal Health Monitor",
+  "description": "📊 24/7 Application Health Monitoring - Post-deployment validation with automatic failure detection and alerts",
+  "iconName": "pulse",
+  "categories": ["Monitoring", "Deployment", "Health checks"],
+  "filePatterns": ["package.json?", "*.js", "*.jsx", "*.ts", "*.tsx"]
+}
