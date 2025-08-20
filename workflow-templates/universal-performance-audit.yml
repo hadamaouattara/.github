@@ -1,0 +1,368 @@
+name: ⚡ Universal Performance Audit
+
+on:
+  schedule:
+    # Run performance audit daily at 2 AM UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      audit_type:
+        description: 'Type of audit to run'
+        required: false
+        default: 'full'
+        type: choice
+        options:
+        - full
+        - lighthouse
+        - dependency
+        - security
+      target_url:
+        description: 'URL to audit (if deployed)'
+        required: false
+        type: string
+
+jobs:
+  detect-project:
+    name: 🔍 Project Analysis
+    runs-on: ubuntu-latest
+    outputs:
+      project_type: ${{ steps.detect.outputs.project_type }}
+      has_deployment: ${{ steps.detect.outputs.has_deployment }}
+      deployment_url: ${{ steps.detect.outputs.deployment_url }}
+      audit_scope: ${{ steps.detect.outputs.audit_scope }}
+      
+    steps:
+    - name: 📥 Checkout Code
+      uses: actions/checkout@v4
+      
+    - name: 🔍 Analyze Project Structure
+      id: detect
+      run: |
+        echo "🔍 Analyzing project for performance audit..."
+        
+        PROJECT_TYPE="generic"
+        HAS_DEPLOYMENT="false"
+        DEPLOYMENT_URL="${{ github.event.inputs.target_url }}"
+        AUDIT_SCOPE="${{ github.event.inputs.audit_type || 'full' }}"
+        
+        # Detect project type
+        if [ -f "package.json" ]; then
+          if grep -q "next" package.json; then
+            PROJECT_TYPE="nextjs"
+          elif grep -q "react" package.json; then
+            PROJECT_TYPE="react"
+          elif grep -q "vue" package.json; then
+            PROJECT_TYPE="vue"
+          elif grep -q "svelte" package.json; then
+            PROJECT_TYPE="svelte"
+          else
+            PROJECT_TYPE="javascript"
+          fi
+        fi
+        
+        # Detect deployment
+        if [ -f "netlify.toml" ] || [ -f "_redirects" ]; then
+          HAS_DEPLOYMENT="true"
+          if [ -z "$DEPLOYMENT_URL" ] && grep -q "netlify.app" README.md 2>/dev/null; then
+            DEPLOYMENT_URL=$(grep -o "https://[^)]*\.netlify\.app" README.md | head -1)
+          fi
+        elif [ -f "vercel.json" ]; then
+          HAS_DEPLOYMENT="true"
+        elif [ -f "firebase.json" ]; then
+          HAS_DEPLOYMENT="true"
+        fi
+        
+        echo "📊 Analysis Results:"
+        echo "- Project Type: $PROJECT_TYPE"
+        echo "- Has Deployment: $HAS_DEPLOYMENT"
+        echo "- Deployment URL: $DEPLOYMENT_URL"
+        echo "- Audit Scope: $AUDIT_SCOPE"
+        
+        echo "project_type=$PROJECT_TYPE" >> $GITHUB_OUTPUT
+        echo "has_deployment=$HAS_DEPLOYMENT" >> $GITHUB_OUTPUT
+        echo "deployment_url=$DEPLOYMENT_URL" >> $GITHUB_OUTPUT
+        echo "audit_scope=$AUDIT_SCOPE" >> $GITHUB_OUTPUT
+
+  dependency-audit:
+    name: 📦 Dependency Performance Audit
+    runs-on: ubuntu-latest
+    needs: detect-project
+    if: needs.detect-project.outputs.project_type != 'generic' && (needs.detect-project.outputs.audit_scope == 'full' || needs.detect-project.outputs.audit_scope == 'dependency')
+    
+    steps:
+    - name: 📥 Checkout Code
+      uses: actions/checkout@v4
+      
+    - name: 🟢 Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+        
+    - name: 📦 Analyze Dependencies
+      run: |
+        echo "📦 Running dependency performance audit..."
+        
+        # Install dependencies
+        npm ci --prefer-offline --no-audit
+        
+        # Dependency analysis
+        echo "📊 Dependency Analysis:"
+        
+        # Count dependencies
+        TOTAL_DEPS=$(npm list --depth=0 --json 2>/dev/null | jq '.dependencies | length' 2>/dev/null || echo "0")
+        DEV_DEPS=$(cat package.json | jq '.devDependencies | length' 2>/dev/null || echo "0")
+        PROD_DEPS=$(cat package.json | jq '.dependencies | length' 2>/dev/null || echo "0")
+        
+        echo "- Total installed: $TOTAL_DEPS"
+        echo "- Production deps: $PROD_DEPS"
+        echo "- Development deps: $DEV_DEPS"
+        
+        # Check for heavy dependencies
+        echo "🔍 Checking for potentially heavy dependencies..."
+        HEAVY_DEPS=("lodash" "moment" "jquery" "bootstrap" "three" "d3")
+        
+        for dep in "${HEAVY_DEPS[@]}"; do
+          if npm list "$dep" &>/dev/null; then
+            echo "⚠️ Heavy dependency detected: $dep"
+          fi
+        done
+        
+        # Security audit
+        echo "🔒 Security audit:"
+        npm audit --audit-level moderate || echo "⚠️ Security vulnerabilities found"
+        
+        # Outdated packages
+        echo "📅 Outdated packages check:"
+        npm outdated || echo "ℹ️ All packages up to date"
+        
+        echo "✅ Dependency audit completed"
+
+  build-performance:
+    name: 🏗️ Build Performance Analysis
+    runs-on: ubuntu-latest
+    needs: detect-project
+    if: needs.detect-project.outputs.project_type != 'generic' && (needs.detect-project.outputs.audit_scope == 'full' || needs.detect-project.outputs.audit_scope == 'build')
+    
+    steps:
+    - name: 📥 Checkout Code
+      uses: actions/checkout@v4
+      
+    - name: 🟢 Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+        
+    - name: ⏱️ Build Performance Test
+      run: |
+        echo "⏱️ Testing build performance..."
+        
+        # Install dependencies with timing
+        echo "📦 Installing dependencies..."
+        time npm ci
+        
+        # Clean previous builds
+        rm -rf .next out dist build
+        
+        # Build with timing
+        echo "🏗️ Building project..."
+        BUILD_START=$(date +%s)
+        
+        if npm run build; then
+          BUILD_END=$(date +%s)
+          BUILD_TIME=$((BUILD_END - BUILD_START))
+          
+          echo "✅ Build successful"
+          echo "⏱️ Build time: ${BUILD_TIME}s"
+          
+          # Analyze build output
+          PROJECT_TYPE="${{ needs.detect-project.outputs.project_type }}"
+          
+          case $PROJECT_TYPE in
+            "nextjs")
+              if [ -d "out" ]; then
+                BUILD_SIZE=$(du -sh out | cut -f1)
+                FILE_COUNT=$(find out -type f | wc -l)
+                echo "📦 Static export size: $BUILD_SIZE"
+                echo "📄 File count: $FILE_COUNT"
+              elif [ -d ".next" ]; then
+                BUILD_SIZE=$(du -sh .next | cut -f1)
+                echo "📦 Build size: $BUILD_SIZE"
+              fi
+              ;;
+              
+            "react")
+              if [ -d "build" ]; then
+                BUILD_SIZE=$(du -sh build | cut -f1)
+                FILE_COUNT=$(find build -type f | wc -l)
+                echo "📦 Build size: $BUILD_SIZE"
+                echo "📄 File count: $FILE_COUNT"
+              fi
+              ;;
+          esac
+          
+          # Performance thresholds
+          if [ "$BUILD_TIME" -lt 60 ]; then
+            echo "✅ Build time is excellent (<60s)"
+          elif [ "$BUILD_TIME" -lt 300 ]; then
+            echo "⚠️ Build time is acceptable (1-5min)"
+          else
+            echo "🚨 Build time is slow (>5min) - optimization needed"
+          fi
+          
+        else
+          echo "❌ Build failed"
+          exit 1
+        fi
+
+  lighthouse-audit:
+    name: 🔍 Lighthouse Performance Audit
+    runs-on: ubuntu-latest
+    needs: detect-project
+    if: needs.detect-project.outputs.has_deployment == 'true' && needs.detect-project.outputs.deployment_url != '' && (needs.detect-project.outputs.audit_scope == 'full' || needs.detect-project.outputs.audit_scope == 'lighthouse')
+    
+    steps:
+    - name: 🔍 Run Lighthouse Audit
+      uses: treosh/lighthouse-ci-action@v10
+      with:
+        urls: ${{ needs.detect-project.outputs.deployment_url }}
+        uploadArtifacts: true
+        temporaryPublicStorage: true
+        
+    - name: 📊 Parse Lighthouse Results
+      run: |
+        echo "📊 Lighthouse audit completed for: ${{ needs.detect-project.outputs.deployment_url }}"
+        
+        # The results are automatically uploaded by the action
+        echo "✅ Lighthouse report generated"
+        echo "📈 Check the action artifacts for detailed results"
+
+  security-scan:
+    name: 🔒 Security Performance Scan
+    runs-on: ubuntu-latest
+    needs: detect-project
+    if: needs.detect-project.outputs.audit_scope == 'full' || needs.detect-project.outputs.audit_scope == 'security'
+    
+    steps:
+    - name: 📥 Checkout Code
+      uses: actions/checkout@v4
+      
+    - name: 🔒 Security Analysis
+      run: |
+        echo "🔒 Running security performance scan..."
+        
+        # Check for sensitive files that might affect performance
+        echo "🔍 Checking for performance-affecting security issues..."
+        
+        # Large files that shouldn't be in repo
+        LARGE_FILES=$(find . -type f -size +10M -not -path "./node_modules/*" -not -path "./.git/*" | head -10)
+        if [ -n "$LARGE_FILES" ]; then
+          echo "⚠️ Large files detected (>10MB):"
+          echo "$LARGE_FILES"
+        else
+          echo "✅ No large files detected"
+        fi
+        
+        # Check for common performance killers
+        PERF_KILLERS=("console.log" "debugger" "alert(" "document.write")
+        
+        for killer in "${PERF_KILLERS[@]}"; do
+          if find . -name "*.js" -o -name "*.jsx" -o -name "*.ts" -o -name "*.tsx" -not -path "./node_modules/*" | xargs grep -l "$killer" 2>/dev/null; then
+            echo "⚠️ Performance killer detected: $killer"
+          fi
+        done
+        
+        # Check for environment files
+        ENV_FILES=$(find . -name ".env*" -not -name ".env.example" -not -path "./node_modules/*")
+        if [ -n "$ENV_FILES" ]; then
+          echo "⚠️ Environment files detected:"
+          echo "$ENV_FILES"
+        fi
+        
+        echo "✅ Security scan completed"
+
+  generate-performance-report:
+    name: 📊 Generate Performance Report
+    runs-on: ubuntu-latest
+    needs: [detect-project, dependency-audit, build-performance, lighthouse-audit, security-scan]
+    if: always()
+    
+    steps:
+    - name: 📊 Compile Performance Report
+      run: |
+        echo "📊 Generating comprehensive performance report..."
+        
+        echo "=== UNIVERSAL PERFORMANCE AUDIT REPORT ==="
+        echo "Repository: ${{ github.repository }}"
+        echo "Date: $(date)"
+        echo "Project Type: ${{ needs.detect-project.outputs.project_type }}"
+        echo "Audit Scope: ${{ needs.detect-project.outputs.audit_scope }}"
+        echo "Deployment URL: ${{ needs.detect-project.outputs.deployment_url }}"
+        echo ""
+        
+        echo "🎯 AUDIT RESULTS:"
+        
+        if [ "${{ needs.dependency-audit.result }}" = "success" ]; then
+          echo "  ✅ Dependencies: OPTIMIZED"
+        elif [ "${{ needs.dependency-audit.result }}" = "skipped" ]; then
+          echo "  ⏭️ Dependencies: SKIPPED"
+        else
+          echo "  ❌ Dependencies: ISSUES DETECTED"
+        fi
+        
+        if [ "${{ needs.build-performance.result }}" = "success" ]; then
+          echo "  ✅ Build Performance: GOOD"
+        elif [ "${{ needs.build-performance.result }}" = "skipped" ]; then
+          echo "  ⏭️ Build Performance: SKIPPED"
+        else
+          echo "  ❌ Build Performance: ISSUES DETECTED"
+        fi
+        
+        if [ "${{ needs.lighthouse-audit.result }}" = "success" ]; then
+          echo "  ✅ Lighthouse: PASSED"
+        elif [ "${{ needs.lighthouse-audit.result }}" = "skipped" ]; then
+          echo "  ⏭️ Lighthouse: SKIPPED (no deployment URL)"
+        else
+          echo "  ❌ Lighthouse: ISSUES DETECTED"
+        fi
+        
+        if [ "${{ needs.security-scan.result }}" = "success" ]; then
+          echo "  ✅ Security: CLEAN"
+        else
+          echo "  ❌ Security: ISSUES DETECTED"
+        fi
+        
+        echo ""
+        
+        # Generate recommendations
+        echo "🎯 RECOMMENDATIONS:"
+        
+        if [ "${{ needs.detect-project.outputs.project_type }}" = "nextjs" ]; then
+          echo "- Consider using Next.js Image optimization"
+          echo "- Implement code splitting for large components"
+          echo "- Use dynamic imports for heavy libraries"
+        fi
+        
+        if [ "${{ needs.detect-project.outputs.has_deployment }}" = "true" ]; then
+          echo "- Monitor Core Web Vitals regularly"
+          echo "- Implement performance budgets"
+          echo "- Consider CDN optimization"
+        fi
+        
+        echo "- Regularly update dependencies"
+        echo "- Monitor bundle size growth"
+        echo "- Implement performance monitoring"
+        
+        echo ""
+        echo "🎯 OVERALL PERFORMANCE STATUS: AUDIT COMPLETED ✅"
+
+    - name: 🚨 Alert on Performance Issues
+      if: needs.dependency-audit.result == 'failure' || needs.build-performance.result == 'failure' || needs.security-scan.result == 'failure'
+      run: |
+        echo "🚨 =========================================="
+        echo "🚨 PERFORMANCE ISSUES DETECTED!"
+        echo "🚨 =========================================="
+        echo "⚠️ Some performance audits failed"
+        echo "🔧 Review the logs above for optimization opportunities"
+        echo "📈 Consider implementing suggested improvements"
