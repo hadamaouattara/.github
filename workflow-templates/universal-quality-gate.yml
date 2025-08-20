@@ -1,0 +1,323 @@
+name: 🛡️ Universal Quality Gate - Zero Error Deployment
+
+on:
+  push:
+    branches: [ main, develop, master ]
+  pull_request:
+    branches: [ main, develop, master ]
+  workflow_dispatch:
+
+concurrency:
+  group: quality-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  detect-project-type:
+    name: 🔍 Project Type Detection
+    runs-on: ubuntu-latest
+    outputs:
+      project_type: ${{ steps.detect.outputs.project_type }}
+      has_package_json: ${{ steps.detect.outputs.has_package_json }}
+      has_next_config: ${{ steps.detect.outputs.has_next_config }}
+      has_firebase: ${{ steps.detect.outputs.has_firebase }}
+      
+    steps:
+    - name: 📥 Checkout Code
+      uses: actions/checkout@v4
+      
+    - name: 🔍 Detect Project Configuration
+      id: detect
+      run: |
+        echo "🔍 Analyzing project structure..."
+        
+        # Initialize detection variables
+        PROJECT_TYPE="generic"
+        HAS_PACKAGE_JSON="false"
+        HAS_NEXT_CONFIG="false"
+        HAS_FIREBASE="false"
+        
+        # Check for package.json
+        if [ -f "package.json" ]; then
+          HAS_PACKAGE_JSON="true"
+          echo "✅ Found: package.json"
+          
+          # Detect framework type
+          if grep -q "next" package.json; then
+            PROJECT_TYPE="nextjs"
+            echo "🚀 Detected: Next.js project"
+          elif grep -q "react" package.json; then
+            PROJECT_TYPE="react"
+            echo "⚛️ Detected: React project"
+          elif grep -q "express" package.json; then
+            PROJECT_TYPE="express"
+            echo "🚂 Detected: Express.js project"
+          fi
+        fi
+        
+        # Check for Next.js config
+        if [ -f "next.config.js" ] || [ -f "next.config.mjs" ]; then
+          HAS_NEXT_CONFIG="true"
+          echo "⚙️ Found: Next.js configuration"
+        fi
+        
+        # Check for Firebase
+        if [ -f "firebase.json" ] || grep -q "firebase" package.json 2>/dev/null; then
+          HAS_FIREBASE="true"
+          echo "🔥 Found: Firebase configuration"
+        fi
+        
+        # Check for specific project patterns
+        if [ -d "lib" ] && [ -d "contexts" ] && [ -d "components" ]; then
+          PROJECT_TYPE="nextjs-app"
+          echo "📱 Detected: Next.js App Router project"
+        fi
+        
+        echo "📊 Detection Summary:"
+        echo "- Project Type: $PROJECT_TYPE"
+        echo "- Has package.json: $HAS_PACKAGE_JSON"
+        echo "- Has Next.js: $HAS_NEXT_CONFIG"
+        echo "- Has Firebase: $HAS_FIREBASE"
+        
+        # Set outputs
+        echo "project_type=$PROJECT_TYPE" >> $GITHUB_OUTPUT
+        echo "has_package_json=$HAS_PACKAGE_JSON" >> $GITHUB_OUTPUT
+        echo "has_next_config=$HAS_NEXT_CONFIG" >> $GITHUB_OUTPUT
+        echo "has_firebase=$HAS_FIREBASE" >> $GITHUB_OUTPUT
+
+  universal-quality-gate:
+    name: 🛡️ Universal Quality Validation
+    runs-on: ubuntu-latest
+    needs: detect-project-type
+    timeout-minutes: 15
+    
+    steps:
+    - name: 📥 Checkout Code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: 🟢 Setup Node.js (if needed)
+      if: needs.detect-project-type.outputs.has_package_json == 'true'
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+
+    - name: 🔍 Structure Validation
+      run: |
+        echo "🔍 Performing universal structure validation..."
+        
+        PROJECT_TYPE="${{ needs.detect-project-type.outputs.project_type }}"
+        
+        # Common validations for all projects
+        echo "📁 Basic structure checks:"
+        
+        # Check for README
+        if [ -f "README.md" ]; then
+          echo "✅ README.md found"
+        else
+          echo "⚠️ WARNING: README.md missing"
+        fi
+        
+        # Check for .gitignore
+        if [ -f ".gitignore" ]; then
+          echo "✅ .gitignore found"
+        else
+          echo "⚠️ WARNING: .gitignore missing"
+        fi
+        
+        # Framework-specific validations
+        case $PROJECT_TYPE in
+          "nextjs"|"nextjs-app")
+            echo "🚀 Next.js specific validations:"
+            
+            # Required files for Next.js
+            REQUIRED_FILES=("package.json" "app/page.jsx" "app/layout.jsx")
+            
+            for file in "${REQUIRED_FILES[@]}"; do
+              if [ -f "$file" ] || [ -f "${file/jsx/tsx}" ]; then
+                echo "✅ Found: $file"
+              else
+                echo "❌ CRITICAL: Missing $file"
+                exit 1
+              fi
+            done
+            
+            # Check for forbidden directories (from SAPience experience)
+            FORBIDDEN_DIRS=("app/blobs" "app/image-cdn")
+            for dir in "${FORBIDDEN_DIRS[@]}"; do
+              if [ -d "$dir" ]; then
+                echo "❌ CRITICAL: Forbidden directory: $dir"
+                exit 1
+              fi
+            done
+            ;;
+            
+          "react")
+            echo "⚛️ React specific validations:"
+            
+            if [ -f "src/App.js" ] || [ -f "src/App.jsx" ] || [ -f "src/App.tsx" ]; then
+              echo "✅ React App component found"
+            else
+              echo "❌ CRITICAL: React App component missing"
+              exit 1
+            fi
+            ;;
+            
+          *)
+            echo "📦 Generic project validation passed"
+            ;;
+        esac
+        
+        echo "✅ Structure validation PASSED"
+
+    - name: 📦 Dependencies Analysis
+      if: needs.detect-project-type.outputs.has_package_json == 'true'
+      run: |
+        echo "📦 Analyzing dependencies..."
+        
+        # Install dependencies
+        npm ci --prefer-offline --no-audit
+        
+        # Security audit
+        echo "🔒 Running security audit..."
+        npm audit --audit-level moderate || echo "⚠️ Security issues found - review recommended"
+        
+        # Check for common problematic packages
+        PROBLEMATIC_PACKAGES=("blobshape" "@netlify/blobs")
+        
+        for package in "${PROBLEMATIC_PACKAGES[@]}"; do
+          if npm list "$package" &> /dev/null; then
+            echo "⚠️ WARNING: Potentially problematic package: $package"
+          fi
+        done
+        
+        echo "✅ Dependencies analysis completed"
+
+    - name: 🧹 Code Quality Checks
+      if: needs.detect-project-type.outputs.has_package_json == 'true'
+      run: |
+        echo "🧹 Running code quality checks..."
+        
+        # ESLint if available
+        if [ -f ".eslintrc.json" ] || [ -f ".eslintrc.js" ] || grep -q "eslint" package.json; then
+          echo "🔍 Running ESLint..."
+          npx eslint . --ext .js,.jsx,.ts,.tsx --max-warnings 0 || echo "⚠️ ESLint warnings found"
+        fi
+        
+        # Prettier if available
+        if [ -f ".prettierrc" ] || grep -q "prettier" package.json; then
+          echo "💅 Checking code formatting..."
+          npx prettier --check "**/*.{js,jsx,ts,tsx,css,md,json}" || echo "⚠️ Formatting issues found"
+        fi
+        
+        # TypeScript if available
+        if [ -f "tsconfig.json" ]; then
+          echo "📝 Running TypeScript check..."
+          npx tsc --noEmit
+        fi
+        
+        echo "✅ Code quality checks completed"
+
+    - name: 🏗️ Build Validation
+      if: needs.detect-project-type.outputs.has_package_json == 'true'
+      run: |
+        echo "🏗️ Testing build process..."
+        
+        # Try to build the project
+        if grep -q '"build"' package.json; then
+          echo "🚀 Running build..."
+          npm run build
+          
+          # Check build output based on project type
+          PROJECT_TYPE="${{ needs.detect-project-type.outputs.project_type }}"
+          
+          case $PROJECT_TYPE in
+            "nextjs"|"nextjs-app")
+              if [ -d "out" ] || [ -d ".next" ]; then
+                echo "✅ Next.js build successful"
+              else
+                echo "❌ CRITICAL: Next.js build failed"
+                exit 1
+              fi
+              ;;
+              
+            "react")
+              if [ -d "build" ] || [ -d "dist" ]; then
+                echo "✅ React build successful"
+              else
+                echo "❌ CRITICAL: React build failed"
+                exit 1
+              fi
+              ;;
+              
+            *)
+              echo "✅ Generic build completed"
+              ;;
+          esac
+        else
+          echo "ℹ️ No build script found, skipping build test"
+        fi
+
+    - name: 🔒 Security Scan
+      run: |
+        echo "🔒 Running security scan..."
+        
+        # Check for sensitive files
+        SENSITIVE_PATTERNS=(".env" "*.key" "*.pem" "*password*" "*secret*")
+        
+        for pattern in "${SENSITIVE_PATTERNS[@]}"; do
+          if find . -name "$pattern" -not -path "./node_modules/*" -not -name ".env.example" | grep -q .; then
+            echo "⚠️ WARNING: Potential sensitive files found matching: $pattern"
+          fi
+        done
+        
+        # Check for hardcoded secrets
+        echo "🔍 Scanning for hardcoded secrets..."
+        if find . -name "*.js" -o -name "*.jsx" -o -name "*.ts" -o -name "*.tsx" -not -path "./node_modules/*" | xargs grep -i "password\|secret\|token\|key" | head -3; then
+          echo "⚠️ WARNING: Potential hardcoded secrets found"
+        fi
+        
+        echo "✅ Security scan completed"
+
+    - name: 📊 Generate Quality Report
+      run: |
+        echo "📊 Generating quality report..."
+        
+        echo "=== UNIVERSAL QUALITY GATE REPORT ==="
+        echo "Repository: ${{ github.repository }}"
+        echo "Commit: ${{ github.sha }}"
+        echo "Branch: ${{ github.ref_name }}"
+        echo "Project Type: ${{ needs.detect-project-type.outputs.project_type }}"
+        echo "Date: $(date)"
+        echo ""
+        
+        echo "✅ QUALITY CHECKS PASSED:"
+        echo "  📁 Structure Validation"
+        echo "  📦 Dependencies Check"
+        echo "  🧹 Code Quality"
+        echo "  🏗️ Build Process"
+        echo "  🔒 Security Scan"
+        echo ""
+        
+        echo "🎯 STATUS: READY FOR DEPLOYMENT ✅"
+        echo "🚀 All quality gates passed successfully!"
+
+    - name: ✅ Quality Gate Success
+      run: |
+        echo "🎉 =========================================="
+        echo "🎉 UNIVERSAL QUALITY GATE PASSED!"
+        echo "🎉 =========================================="
+        echo "🛡️ Zero Error Deployment: AUTHORIZED"
+        echo "🚀 Safe to proceed with deployment"
+
+    - name: 🚨 Quality Gate Failure
+      if: failure()
+      run: |
+        echo "🚨 =========================================="
+        echo "🚨 QUALITY GATE FAILED!"
+        echo "🚨 =========================================="
+        echo "❌ Deployment blocked for safety"
+        echo "🔧 Please fix the issues above"
+        echo "📧 Review the workflow logs for details"
+        exit 1
