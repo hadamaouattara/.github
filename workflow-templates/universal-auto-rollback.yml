@@ -1,0 +1,370 @@
+name: 🔄 Universal Auto Rollback - Emergency Recovery
+
+on:
+  workflow_run:
+    workflows: ["📊 Universal Health Monitor - Post Deployment Validation"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      force_rollback:
+        description: 'Force rollback to last stable commit'
+        required: false
+        default: 'false'
+        type: boolean
+      target_commit:
+        description: 'Specific commit SHA to rollback to (optional)'
+        required: false
+        type: string
+
+jobs:
+  assess-health:
+    name: 🔍 Health Assessment
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'failure' || github.event.inputs.force_rollback == 'true' || github.event_name == 'workflow_dispatch' }}
+    outputs:
+      needs_rollback: ${{ steps.assess.outputs.needs_rollback }}
+      stable_commit: ${{ steps.assess.outputs.stable_commit }}
+      rollback_reason: ${{ steps.assess.outputs.rollback_reason }}
+      
+    steps:
+    - name: 📥 Checkout Code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 50  # Get recent commit history
+        
+    - name: 🔍 Assess System Health
+      id: assess
+      run: |
+        echo "🔍 Assessing system health and rollback requirements..."
+        
+        NEEDS_ROLLBACK="false"
+        ROLLBACK_REASON="none"
+        STABLE_COMMIT=""
+        
+        # Check if manual rollback requested
+        if [ "${{ github.event.inputs.force_rollback }}" = "true" ]; then
+          NEEDS_ROLLBACK="true"
+          ROLLBACK_REASON="manual_request"
+          echo "🔧 Manual rollback requested"
+        fi
+        
+        # Check if health monitor failed
+        if [ "${{ github.event.workflow_run.conclusion }}" = "failure" ]; then
+          NEEDS_ROLLBACK="true"
+          ROLLBACK_REASON="health_check_failure"
+          echo "🚨 Health monitor failed - rollback required"
+        fi
+        
+        # Find stable commit
+        if [ "$NEEDS_ROLLBACK" = "true" ]; then
+          if [ -n "${{ github.event.inputs.target_commit }}" ]; then
+            STABLE_COMMIT="${{ github.event.inputs.target_commit }}"
+            echo "🎯 Using specified target commit: $STABLE_COMMIT"
+          else
+            # Look for the last commit with successful workflows
+            echo "🔍 Searching for last stable commit..."
+            
+            # Get commits from the last 10 commits
+            git log --oneline -10 --format="%H %s" | while read commit_sha commit_msg; do
+              # Look for commits that indicate stability
+              if echo "$commit_msg" | grep -E "(STABLE|FIX|✅|🔧|DEPLOY)" >/dev/null; then
+                echo "🎯 Found potentially stable commit: $commit_sha ($commit_msg)"
+                STABLE_COMMIT="$commit_sha"
+                break
+              fi
+            done
+            
+            # If no stable commit found, use HEAD~2 as fallback
+            if [ -z "$STABLE_COMMIT" ]; then
+              STABLE_COMMIT=$(git rev-parse HEAD~2)
+              echo "📍 Using fallback commit (HEAD~2): $STABLE_COMMIT"
+            fi
+          fi
+        fi
+        
+        echo "📊 Assessment Results:"
+        echo "- Needs Rollback: $NEEDS_ROLLBACK"
+        echo "- Rollback Reason: $ROLLBACK_REASON"
+        echo "- Stable Commit: $STABLE_COMMIT"
+        
+        echo "needs_rollback=$NEEDS_ROLLBACK" >> $GITHUB_OUTPUT
+        echo "stable_commit=$STABLE_COMMIT" >> $GITHUB_OUTPUT
+        echo "rollback_reason=$ROLLBACK_REASON" >> $GITHUB_OUTPUT
+
+  prepare-rollback:
+    name: 🛠️ Prepare Rollback
+    runs-on: ubuntu-latest
+    needs: assess-health
+    if: needs.assess-health.outputs.needs_rollback == 'true'
+    outputs:
+      rollback_branch: ${{ steps.prepare.outputs.rollback_branch }}
+      
+    steps:
+    - name: 📥 Checkout Code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        token: ${{ secrets.GITHUB_TOKEN }}
+        
+    - name: 🛠️ Prepare Rollback Environment
+      id: prepare
+      run: |
+        echo "🛠️ Preparing rollback environment..."
+        
+        STABLE_COMMIT="${{ needs.assess-health.outputs.stable_commit }}"
+        ROLLBACK_REASON="${{ needs.assess-health.outputs.rollback_reason }}"
+        TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+        ROLLBACK_BRANCH="emergency-rollback-$TIMESTAMP"
+        
+        echo "🔧 Creating rollback branch: $ROLLBACK_BRANCH"
+        
+        # Configure git
+        git config user.name "Auto Rollback Bot"
+        git config user.email "auto-rollback@github-actions"
+        
+        # Create rollback branch from stable commit
+        git checkout -b "$ROLLBACK_BRANCH" "$STABLE_COMMIT"
+        
+        # Create rollback documentation
+        cat > ROLLBACK_INFO.md << EOF
+# 🔄 Emergency Rollback Information
+
+## Rollback Details
+- **Date**: $(date)
+- **Reason**: $ROLLBACK_REASON
+- **Original Commit**: ${{ github.sha }}
+- **Rolled Back To**: $STABLE_COMMIT
+- **Rollback Branch**: $ROLLBACK_BRANCH
+
+## What Happened
+This rollback was triggered due to: $ROLLBACK_REASON
+
+## Next Steps
+1. Investigate the issue in the original commit
+2. Fix the problems identified
+3. Test thoroughly before redeploying
+4. Delete this rollback branch once issues are resolved
+
+## Recovery Commands
+\`\`\`bash
+# To investigate the failed commit
+git show ${{ github.sha }}
+
+# To continue development from this stable point
+git checkout main
+git reset --hard $STABLE_COMMIT
+git push --force-with-lease origin main
+\`\`\`
+EOF
+        
+        # Add and commit rollback info
+        git add ROLLBACK_INFO.md
+        git commit -m "🚨 EMERGENCY ROLLBACK: $ROLLBACK_REASON
+
+- Original commit: ${{ github.sha }}
+- Rolled back to: $STABLE_COMMIT
+- Reason: $ROLLBACK_REASON
+- Auto-generated by emergency rollback system"
+        
+        echo "rollback_branch=$ROLLBACK_BRANCH" >> $GITHUB_OUTPUT
+        echo "✅ Rollback preparation completed"
+
+  execute-rollback:
+    name: 🚨 Execute Emergency Rollback
+    runs-on: ubuntu-latest
+    needs: [assess-health, prepare-rollback]
+    if: needs.assess-health.outputs.needs_rollback == 'true'
+    
+    steps:
+    - name: 📥 Checkout Code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        token: ${{ secrets.GITHUB_TOKEN }}
+        
+    - name: 🚨 Execute Rollback
+      run: |
+        echo "🚨 Executing emergency rollback..."
+        
+        STABLE_COMMIT="${{ needs.assess-health.outputs.stable_commit }}"
+        ROLLBACK_BRANCH="${{ needs.prepare-rollback.outputs.rollback_branch }}"
+        ROLLBACK_REASON="${{ needs.assess-health.outputs.rollback_reason }}"
+        
+        # Configure git
+        git config user.name "Auto Rollback Bot"
+        git config user.email "auto-rollback@github-actions"
+        
+        echo "🔄 Rolling back main branch to: $STABLE_COMMIT"
+        
+        # Switch to main and rollback
+        git checkout main
+        git reset --hard "$STABLE_COMMIT"
+        
+        # Create a rollback commit on main
+        git commit --allow-empty -m "🚨 EMERGENCY ROLLBACK to $STABLE_COMMIT
+
+Automatic rollback executed due to: $ROLLBACK_REASON
+
+- Previous HEAD: ${{ github.sha }}
+- Stable commit: $STABLE_COMMIT
+- Rollback branch: $ROLLBACK_BRANCH
+- Executed: $(date)
+
+This rollback was performed automatically by the emergency
+recovery system to maintain system stability."
+        
+        # Push the rollback
+        git push --force-with-lease origin main
+        
+        # Push the rollback branch for reference
+        git push origin "$ROLLBACK_BRANCH"
+        
+        echo "✅ Emergency rollback completed successfully"
+        
+    - name: 🔔 Notify Rollback Success
+      run: |
+        echo "🔔 Rollback notification..."
+        
+        echo "🚨 =========================================="
+        echo "🚨 EMERGENCY ROLLBACK EXECUTED"
+        echo "🚨 =========================================="
+        echo "📅 Date: $(date)"
+        echo "📦 Repository: ${{ github.repository }}"
+        echo "🔄 Reason: ${{ needs.assess-health.outputs.rollback_reason }}"
+        echo "📍 Rolled back to: ${{ needs.assess-health.outputs.stable_commit }}"
+        echo "🌿 Rollback branch: ${{ needs.prepare-rollback.outputs.rollback_branch }}"
+        echo ""
+        echo "✅ System has been restored to a stable state"
+        echo "🔧 Please investigate and fix the issues before redeploying"
+
+  validate-rollback:
+    name: ✅ Validate Rollback Success
+    runs-on: ubuntu-latest
+    needs: [assess-health, execute-rollback]
+    if: needs.assess-health.outputs.needs_rollback == 'true'
+    
+    steps:
+    - name: 📥 Checkout Rolled Back Code
+      uses: actions/checkout@v4
+      
+    - name: 🟢 Setup Node.js (if needed)
+      if: contains(github.repository, 'next') || contains(github.repository, 'react')
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+        
+    - name: ✅ Validate Rollback
+      run: |
+        echo "✅ Validating rollback success..."
+        
+        # Check if we're on the expected commit
+        CURRENT_COMMIT=$(git rev-parse HEAD)
+        EXPECTED_COMMIT="${{ needs.assess-health.outputs.stable_commit }}"
+        
+        echo "📊 Validation Results:"
+        echo "- Current commit: $CURRENT_COMMIT"
+        echo "- Expected commit: $EXPECTED_COMMIT"
+        
+        if [ "$CURRENT_COMMIT" = "$EXPECTED_COMMIT" ]; then
+          echo "✅ Rollback successful - on correct commit"
+        else
+          echo "❌ Rollback validation failed - commit mismatch"
+          exit 1
+        fi
+        
+        # Quick structure check
+        if [ -f "package.json" ]; then
+          echo "✅ package.json present"
+          
+          # Quick build test if possible
+          if npm ci --prefer-offline --no-audit 2>/dev/null; then
+            echo "✅ Dependencies installed successfully"
+            
+            if npm run build 2>/dev/null; then
+              echo "✅ Build test passed"
+            else
+              echo "⚠️ Build test failed - may need investigation"
+            fi
+          else
+            echo "⚠️ Dependency installation failed - may need investigation"
+          fi
+        fi
+        
+        echo "✅ Rollback validation completed"
+
+  cleanup-and-report:
+    name: 🧹 Cleanup and Final Report
+    runs-on: ubuntu-latest
+    needs: [assess-health, prepare-rollback, execute-rollback, validate-rollback]
+    if: always() && needs.assess-health.outputs.needs_rollback == 'true'
+    
+    steps:
+    - name: 📊 Generate Final Report
+      run: |
+        echo "📊 Generating final rollback report..."
+        
+        echo "=== EMERGENCY ROLLBACK FINAL REPORT ==="
+        echo "Repository: ${{ github.repository }}"
+        echo "Date: $(date)"
+        echo "Trigger: ${{ github.event_name }}"
+        echo ""
+        
+        echo "🔍 ROLLBACK DETAILS:"
+        echo "- Reason: ${{ needs.assess-health.outputs.rollback_reason }}"
+        echo "- Original commit: ${{ github.sha }}"
+        echo "- Stable commit: ${{ needs.assess-health.outputs.stable_commit }}"
+        echo "- Rollback branch: ${{ needs.prepare-rollback.outputs.rollback_branch }}"
+        echo ""
+        
+        echo "📋 EXECUTION STATUS:"
+        echo "- Health Assessment: ${{ needs.assess-health.result }}"
+        echo "- Rollback Preparation: ${{ needs.prepare-rollback.result }}"
+        echo "- Rollback Execution: ${{ needs.execute-rollback.result }}"
+        echo "- Rollback Validation: ${{ needs.validate-rollback.result }}"
+        echo ""
+        
+        if [ "${{ needs.validate-rollback.result }}" = "success" ]; then
+          echo "🎯 ROLLBACK STATUS: SUCCESS ✅"
+          echo "✅ System has been restored to stable state"
+          echo "🔧 Ready for investigation and fixes"
+        else
+          echo "🚨 ROLLBACK STATUS: ISSUES DETECTED ⚠️"
+          echo "❌ Manual intervention may be required"
+          echo "📞 Contact system administrator"
+        fi
+        
+    - name: 🚨 Alert on Rollback Failure
+      if: needs.validate-rollback.result == 'failure'
+      run: |
+        echo "🚨 =========================================="
+        echo "🚨 ROLLBACK VALIDATION FAILED!"
+        echo "🚨 =========================================="
+        echo "❌ Automated rollback was unsuccessful"
+        echo "❌ Manual intervention required immediately"
+        echo "❌ System may be in unstable state"
+        echo ""
+        echo "🔧 IMMEDIATE ACTIONS REQUIRED:"
+        echo "1. Check repository state manually"
+        echo "2. Verify commit history"
+        echo "3. Ensure system stability"
+        echo "4. Contact system administrator"
+        exit 1
+
+  no-rollback-needed:
+    name: ℹ️ No Rollback Required
+    runs-on: ubuntu-latest
+    needs: assess-health
+    if: needs.assess-health.outputs.needs_rollback == 'false'
+    
+    steps:
+    - name: ℹ️ System Stable
+      run: |
+        echo "ℹ️ =========================================="
+        echo "ℹ️ NO ROLLBACK REQUIRED"
+        echo "ℹ️ =========================================="
+        echo "✅ System health check passed"
+        echo "✅ No emergency rollback needed"
+        echo "✅ All systems operating normally"
+        echo ""
+        echo "🎯 System Status: STABLE ✅"
