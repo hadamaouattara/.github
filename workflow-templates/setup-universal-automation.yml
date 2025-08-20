@@ -1,0 +1,384 @@
+name: 🛠️ Setup Universal Automation
+
+on:
+  workflow_dispatch:
+    inputs:
+      workflows:
+        description: 'Which workflows to install?'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+        - all
+        - quality-gate
+        - health-monitor
+        - auto-rollback
+        - performance-audit
+        - minimal (quality-gate + health-monitor)
+      
+      custom_config:
+        description: 'Apply project-specific optimizations?'
+        required: false
+        default: true
+        type: boolean
+        
+      enable_notifications:
+        description: 'Enable notification workflows?'
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  detect-project:
+    name: 🔍 Analyze Project
+    runs-on: ubuntu-latest
+    outputs:
+      project_type: ${{ steps.detect.outputs.project_type }}
+      framework: ${{ steps.detect.outputs.framework }}
+      deployment: ${{ steps.detect.outputs.deployment }}
+      recommendations: ${{ steps.detect.outputs.recommendations }}
+      
+    steps:
+    - name: 📥 Checkout Repository
+      uses: actions/checkout@v4
+      
+    - name: 🔍 Detect Project Configuration
+      id: detect
+      run: |
+        echo "🔍 Analyzing project structure..."
+        
+        PROJECT_TYPE="generic"
+        FRAMEWORK="none"
+        DEPLOYMENT="none"
+        RECOMMENDATIONS=""
+        
+        # Detect framework
+        if [ -f "package.json" ]; then
+          if grep -q "next" package.json; then
+            PROJECT_TYPE="frontend"
+            FRAMEWORK="nextjs"
+          elif grep -q "react" package.json && ! grep -q "next" package.json; then
+            PROJECT_TYPE="frontend"
+            FRAMEWORK="react"
+          elif grep -q "vue" package.json; then
+            PROJECT_TYPE="frontend"
+            FRAMEWORK="vue"
+          elif grep -q "svelte" package.json; then
+            PROJECT_TYPE="frontend"
+            FRAMEWORK="svelte"
+          elif grep -q "express" package.json; then
+            PROJECT_TYPE="backend"
+            FRAMEWORK="express"
+          else
+            PROJECT_TYPE="javascript"
+            FRAMEWORK="javascript"
+          fi
+        fi
+        
+        # Detect deployment
+        if [ -f "netlify.toml" ] || [ -f "_redirects" ]; then
+          DEPLOYMENT="netlify"
+        elif [ -f "vercel.json" ]; then
+          DEPLOYMENT="vercel"
+        elif [ -f "firebase.json" ]; then
+          DEPLOYMENT="firebase"
+        fi
+        
+        # Generate recommendations
+        if [ "$FRAMEWORK" = "nextjs" ]; then
+          RECOMMENDATIONS="Next.js optimizations: Image optimization, bundle analysis, static export config"
+        elif [ "$FRAMEWORK" = "react" ]; then
+          RECOMMENDATIONS="React optimizations: Bundle splitting, performance monitoring"
+        fi
+        
+        echo "📊 Analysis Results:"
+        echo "- Project Type: $PROJECT_TYPE"
+        echo "- Framework: $FRAMEWORK"
+        echo "- Deployment: $DEPLOYMENT"
+        echo "- Recommendations: $RECOMMENDATIONS"
+        
+        echo "project_type=$PROJECT_TYPE" >> $GITHUB_OUTPUT
+        echo "framework=$FRAMEWORK" >> $GITHUB_OUTPUT
+        echo "deployment=$DEPLOYMENT" >> $GITHUB_OUTPUT
+        echo "recommendations=$RECOMMENDATIONS" >> $GITHUB_OUTPUT
+
+  install-workflows:
+    name: 📦 Install Automation Workflows
+    runs-on: ubuntu-latest
+    needs: detect-project
+    
+    steps:
+    - name: 📥 Checkout Repository
+      uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        
+    - name: 📦 Download Universal Workflows
+      run: |
+        echo "📦 Installing automation workflows..."
+        
+        BASE_URL="https://raw.githubusercontent.com/hadamaouattara/.github/main/workflow-templates"
+        WORKFLOWS="${{ github.event.inputs.workflows }}"
+        
+        # Create workflows directory
+        mkdir -p .github/workflows
+        
+        # Install workflows based on selection
+        case $WORKFLOWS in
+          "all")
+            echo "📦 Installing all workflows..."
+            curl -o .github/workflows/universal-quality-gate.yml "$BASE_URL/universal-quality-gate.yml"
+            curl -o .github/workflows/universal-health-monitor.yml "$BASE_URL/universal-health-monitor.yml"
+            curl -o .github/workflows/universal-auto-rollback.yml "$BASE_URL/universal-auto-rollback.yml"
+            curl -o .github/workflows/universal-performance-audit.yml "$BASE_URL/universal-performance-audit.yml"
+            ;;
+            
+          "minimal")
+            echo "📦 Installing minimal workflows..."
+            curl -o .github/workflows/universal-quality-gate.yml "$BASE_URL/universal-quality-gate.yml"
+            curl -o .github/workflows/universal-health-monitor.yml "$BASE_URL/universal-health-monitor.yml"
+            ;;
+            
+          "quality-gate")
+            curl -o .github/workflows/universal-quality-gate.yml "$BASE_URL/universal-quality-gate.yml"
+            ;;
+            
+          "health-monitor")
+            curl -o .github/workflows/universal-health-monitor.yml "$BASE_URL/universal-health-monitor.yml"
+            ;;
+            
+          "auto-rollback")
+            curl -o .github/workflows/universal-auto-rollback.yml "$BASE_URL/universal-auto-rollback.yml"
+            ;;
+            
+          "performance-audit")
+            curl -o .github/workflows/universal-performance-audit.yml "$BASE_URL/universal-performance-audit.yml"
+            ;;
+        esac
+        
+        echo "✅ Workflows downloaded successfully"
+
+  configure-project:
+    name: ⚙️ Configure Project Settings
+    runs-on: ubuntu-latest
+    needs: [detect-project, install-workflows]
+    if: github.event.inputs.custom_config == 'true'
+    
+    steps:
+    - name: 📥 Checkout Repository
+      uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        
+    - name: ⚙️ Apply Framework-Specific Configurations
+      run: |
+        echo "⚙️ Applying project-specific configurations..."
+        
+        FRAMEWORK="${{ needs.detect-project.outputs.framework }}"
+        
+        case $FRAMEWORK in
+          "nextjs")
+            echo "🚀 Configuring Next.js optimizations..."
+            
+            # Ensure proper Next.js config exists
+            if [ ! -f "next.config.js" ]; then
+              cat > next.config.js << 'EOF'
+/** @type {import('next').NextConfig} */
+const nextConfig = {
+  // Automatic optimization
+  poweredByHeader: false,
+  reactStrictMode: true,
+  
+  // Performance optimizations
+  experimental: {
+    optimizeCss: true,
+  },
+  
+  // Image optimization
+  images: {
+    formats: ['image/webp', 'image/avif'],
+  },
+}
+
+module.exports = nextConfig
+EOF
+              echo "✅ Created optimized next.config.js"
+            fi
+            ;;
+            
+          "react")
+            echo "⚛️ Configuring React optimizations..."
+            
+            # Add build optimization script if missing
+            if [ -f "package.json" ] && ! grep -q "analyze" package.json; then
+              npm install --save-dev source-map-explorer
+              
+              # Add bundle analyzer script
+              node -e "
+                const pkg = require('./package.json');
+                pkg.scripts = pkg.scripts || {};
+                pkg.scripts.analyze = 'npm run build && npx source-map-explorer build/static/js/*.js';
+                require('fs').writeFileSync('package.json', JSON.stringify(pkg, null, 2));
+              "
+              echo "✅ Added bundle analysis script"
+            fi
+            ;;
+        esac
+
+  create-documentation:
+    name: 📚 Create Project Documentation
+    runs-on: ubuntu-latest
+    needs: [detect-project, install-workflows, configure-project]
+    if: always()
+    
+    steps:
+    - name: 📥 Checkout Repository
+      uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        
+    - name: 📚 Generate Automation Documentation
+      run: |
+        echo "📚 Creating automation documentation..."
+        
+        cat > AUTOMATION_SETUP.md << EOF
+# 🤖 Automation Setup Report
+
+## 📊 Project Analysis
+- **Project Type**: ${{ needs.detect-project.outputs.project_type }}
+- **Framework**: ${{ needs.detect-project.outputs.framework }}
+- **Deployment**: ${{ needs.detect-project.outputs.deployment }}
+- **Date**: $(date)
+
+## 🛠️ Installed Workflows
+- **Selection**: ${{ github.event.inputs.workflows }}
+- **Custom Config**: ${{ github.event.inputs.custom_config }}
+- **Notifications**: ${{ github.event.inputs.enable_notifications }}
+
+### Active Workflows:
+EOF
+
+        # List installed workflows
+        if [ -f ".github/workflows/universal-quality-gate.yml" ]; then
+          echo "- ✅ **Quality Gate**: Validates every commit" >> AUTOMATION_SETUP.md
+        fi
+        
+        if [ -f ".github/workflows/universal-health-monitor.yml" ]; then
+          echo "- ✅ **Health Monitor**: Post-deployment validation" >> AUTOMATION_SETUP.md
+        fi
+        
+        if [ -f ".github/workflows/universal-auto-rollback.yml" ]; then
+          echo "- ✅ **Auto Rollback**: Emergency recovery system" >> AUTOMATION_SETUP.md
+        fi
+        
+        if [ -f ".github/workflows/universal-performance-audit.yml" ]; then
+          echo "- ✅ **Performance Audit**: Daily performance monitoring" >> AUTOMATION_SETUP.md
+        fi
+
+        cat >> AUTOMATION_SETUP.md << EOF
+
+## 🎯 Next Steps
+
+### Immediate Actions:
+1. **Test the workflows** by making a commit
+2. **Check Actions tab** to see workflows in action
+3. **Review workflow logs** for any issues
+
+### Recommended Optimizations:
+${{ needs.detect-project.outputs.recommendations }}
+
+### Monitoring:
+- Quality Gate runs on every push
+- Health Monitor checks every 6 hours
+- Performance Audit runs daily at 2 AM UTC
+- Auto Rollback triggers on critical failures
+
+## 🆘 Troubleshooting
+
+If workflows fail:
+1. Check the Actions tab for error details
+2. Ensure required scripts exist in package.json
+3. Verify project structure matches framework standards
+4. Review AUTOMATION_TROUBLESHOOTING.md for common issues
+
+## 📞 Support
+- Documentation: https://github.com/hadamaouattara/.github
+- Issues: Create an issue mentioning @hadamaouattara
+- Templates: Available in the .github repository
+
+---
+**Generated by Universal Automation Setup**
+EOF
+
+        echo "✅ Documentation created: AUTOMATION_SETUP.md"
+
+  finalize-setup:
+    name: ✅ Finalize Installation
+    runs-on: ubuntu-latest
+    needs: [detect-project, install-workflows, configure-project, create-documentation]
+    if: always()
+    
+    steps:
+    - name: 📥 Checkout Repository
+      uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        
+    - name: ✅ Commit All Changes
+      run: |
+        echo "✅ Finalizing automation setup..."
+        
+        # Configure git
+        git config user.name "Universal Automation Setup"
+        git config user.email "automation@github-actions"
+        
+        # Add all changes
+        git add .
+        
+        # Check if there are changes to commit
+        if git diff --staged --quiet; then
+          echo "ℹ️ No changes to commit"
+        else
+          # Create commit
+          git commit -m "🚀 Setup Universal GitHub Actions Automation
+
+Installed workflows: ${{ github.event.inputs.workflows }}
+Project type: ${{ needs.detect-project.outputs.project_type }}
+Framework: ${{ needs.detect-project.outputs.framework }}
+Custom config: ${{ github.event.inputs.custom_config }}
+
+This commit adds comprehensive automation including:
+- Quality gate validation
+- Health monitoring
+- Performance auditing
+- Emergency rollback system
+
+Generated by Universal Automation Setup"
+          
+          # Push changes
+          git push
+          
+          echo "✅ Automation setup completed successfully!"
+        fi
+        
+    - name: 🎉 Setup Complete
+      run: |
+        echo "🎉 =========================================="
+        echo "🎉 UNIVERSAL AUTOMATION SETUP COMPLETE!"
+        echo "🎉 =========================================="
+        echo ""
+        echo "✅ Workflows installed: ${{ github.event.inputs.workflows }}"
+        echo "✅ Project type: ${{ needs.detect-project.outputs.project_type }}"
+        echo "✅ Framework: ${{ needs.detect-project.outputs.framework }}"
+        echo "✅ Custom configuration: ${{ github.event.inputs.custom_config }}"
+        echo ""
+        echo "🎯 WHAT HAPPENS NEXT:"
+        echo "1. Quality Gate will validate your next commit"
+        echo "2. Health Monitor will start checking every 6 hours"
+        echo "3. Performance Audit will run daily"
+        echo "4. Auto Rollback is ready for emergencies"
+        echo ""
+        echo "📚 Check AUTOMATION_SETUP.md for details"
+        echo "🔍 Monitor progress in the Actions tab"
+        echo ""
+        echo "🚀 Your project is now fully automated! 🚀"
