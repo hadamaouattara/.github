@@ -1,0 +1,7 @@
+{
+  "name": "Setup Universal Automation",
+  "description": "🛠️ One-Click Automation Setup - Intelligent installer for all Universal GitHub Actions workflows with project detection",
+  "iconName": "gear",
+  "categories": ["Automation", "Setup", "Configuration"],
+  "filePatterns": ["package.json?", ".github/workflows/*.yml"]
+}
