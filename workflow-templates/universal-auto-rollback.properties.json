@@ -1,0 +1,7 @@
+{
+  "name": "Universal Auto Rollback",
+  "description": "🔄 Emergency Recovery System - Automatic rollback with intelligent failure detection and stable version recovery",
+  "iconName": "history",
+  "categories": ["Deployment", "Recovery", "Emergency response"],
+  "filePatterns": ["package.json?", ".github/workflows/*.yml"]
+}
