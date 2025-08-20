@@ -1,0 +1,7 @@
+{
+  "name": "Universal Quality Gate",
+  "description": "🛡️ Zero Error Deployment - Comprehensive quality validation for any project type with automatic framework detection",
+  "iconName": "shield",
+  "categories": ["Continuous integration", "Code review", "Security"],
+  "filePatterns": ["package.json?", "*.js", "*.jsx", "*.ts", "*.tsx", "next.config.*"]
+}
